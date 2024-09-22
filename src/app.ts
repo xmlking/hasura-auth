@@ -1,25 +1,22 @@
 import { sendError } from '@/errors';
 import { ReasonPhrases } from 'http-status-codes';
-import { json } from 'body-parser';
 import express from 'express';
-import helmet from 'helmet';
 import { serverErrors } from './errors';
 import { httpLogger, logger, uncaughtErrorLogger } from './logger';
 import { authMiddleware } from './middleware/auth';
-import { addOpenApiRoute } from './openapi';
 import router from './routes';
 import { ENV } from './utils/env';
 
 const app = express();
+app.disable('x-powered-by');
+app.set("etag", false);
+app.use(express.json())
 
 if (process.env.NODE_ENV === 'production') {
   app.set('trust proxy', 1);
 }
 
-addOpenApiRoute(app);
-
 app.use(httpLogger);
-app.use(helmet(), json());
 app.use(authMiddleware);
 app.use(ENV.AUTH_API_PREFIX, router);
 app.use(uncaughtErrorLogger, serverErrors);

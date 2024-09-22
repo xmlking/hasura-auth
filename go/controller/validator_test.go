@@ -21,7 +21,7 @@ func getConfig() *controller.Config {
 		HasuraAdminSecret:        "nhost-admin-secret",
 		AllowedEmailDomains:      []string{},
 		AllowedEmails:            []string{},
-		AllowedRedirectURLs:      []*url.URL{},
+		AllowedRedirectURLs:      []string{},
 		BlockedEmailDomains:      []string{},
 		BlockedEmails:            []string{},
 		ClientURL:                clientURL,
@@ -71,6 +71,9 @@ func TestValidateRedirectTo(t *testing.T) {
 				"https://*.acme.io",
 				"https://*-sub.acme.io",
 				"myapp://my.app",
+				"https://mydomainwithslash.com/",
+				"https://mydomainwithslashstar.com/*",
+				"https://mydomainwithslashstarstar.com/**",
 			},
 			redirectTos: []string{
 				"http://localhost:3000",
@@ -91,6 +94,21 @@ func TestValidateRedirectTo(t *testing.T) {
 				"myapp://my.app",
 				"myapp://my.app/",
 				"myapp://my.app/subpath",
+				"https://mydomainwithslash.com",
+				"https://mydomainwithslash.com/",
+				"https://mydomainwithslash.com/a",
+				"https://mydomainwithslash.com/a/",
+				"https://mydomainwithslash.com/a/b",
+				"https://mydomainwithslashstar.com",
+				"https://mydomainwithslashstar.com/",
+				"https://mydomainwithslashstar.com/a",
+				"https://mydomainwithslashstar.com/a/",
+				"https://mydomainwithslashstar.com/a/b",
+				"https://mydomainwithslashstarstar.com",
+				"https://mydomainwithslashstarstar.com/",
+				"https://mydomainwithslashstarstar.com/a",
+				"https://mydomainwithslashstarstar.com/a/",
+				"https://mydomainwithslashstarstar.com/a/b",
 			},
 			allowed: true,
 		},
@@ -100,7 +118,6 @@ func TestValidateRedirectTo(t *testing.T) {
 				"http://localhost:3000",
 				"https://acme.com/path",
 				"https://*.acme.io",
-				"https://*-sub.acme.io",
 				"http://simple.com",
 			},
 			redirectTos: []string{
@@ -113,7 +130,6 @@ func TestValidateRedirectTo(t *testing.T) {
 				"https://acme.com/wrongpath",
 				"https://subdomain.subdomain.acme.io", // only one wildcard in the url
 				"https://acme.io",                     // bare is not allowed because we expect *.acme.io
-				"https://-sub.acme.io",                // similar to above
 				"https://simple.com.hijack.com",       // make sure anchors are set properly
 				"https://simple.comhijack.com",        // make sure anchors are set properly
 			},
@@ -128,21 +144,10 @@ func TestValidateRedirectTo(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tc := tc
 
-			allowedURLs := make([]*url.URL, len(tc.allowedURLs))
-			for i, u := range tc.allowedURLs {
-				url, err := url.Parse(u)
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				allowedURLs[i] = url
-			}
-
-			fn, err := controller.ValidateRedirectTo(allowedURLs)
+			fn, err := controller.ValidateRedirectTo(tc.allowedURLs)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -259,30 +264,73 @@ func TestValidateEmail(t *testing.T) {
 			expected:       false,
 		},
 		{
-			name:           "allowed email or domain match",
-			blockedDomains: []string{},
-			blockedEmails:  []string{},
-			allowedDomains: []string{"example.com"},
-			allowedEmails:  []string{"test@acme.com"},
-			email:          "test@acme.com",
+			name:           "precedence - unrelated",
+			blockedDomains: []string{"blocked.com"},
+			blockedEmails:  []string{"evil@acme.com"},
+			allowedDomains: []string{"acme.com"},
+			allowedEmails:  []string{"good@blocked.com"},
+			email:          "random@company.com",
+			expected:       false,
+		},
+		{
+			name:           "precedence - allowed email",
+			blockedDomains: []string{"blocked.com"},
+			blockedEmails:  []string{"evil@acme.com"},
+			allowedDomains: []string{"acme.com"},
+			allowedEmails:  []string{"good@blocked.com"},
+			email:          "good@blocked.com",
 			expected:       true,
 		},
 		{
-			name:           "allowed email or domain not match",
-			blockedDomains: []string{},
-			blockedEmails:  []string{},
-			allowedDomains: []string{"example.com"},
-			allowedEmails:  []string{"test@acme.com"},
-			email:          "test@example.in",
+			name:           "precedence - blocked email",
+			blockedDomains: []string{"blocked.com"},
+			blockedEmails:  []string{"evil@acme.com"},
+			allowedDomains: []string{"acme.com"},
+			allowedEmails:  []string{"good@blocked.com"},
+			email:          "evil@acme.com",
+			expected:       false,
+		},
+		{
+			name:           "precedence - blocked domain",
+			blockedDomains: []string{"blocked.com"},
+			blockedEmails:  []string{"evil@acme.com"},
+			allowedDomains: []string{"acme.com"},
+			allowedEmails:  []string{"good@blocked.com"},
+			email:          "asd@evil.com",
+			expected:       false,
+		},
+		{
+			name:           "precedence - allowed domain",
+			blockedDomains: []string{"blocked.com"},
+			blockedEmails:  []string{"evil@acme.com"},
+			allowedDomains: []string{"acme.com"},
+			allowedEmails:  []string{"good@blocked.com"},
+			email:          "asd@acme.com",
+			expected:       true,
+		},
+		{
+			name:           "blocking take precedence over allowing",
+			blockedDomains: []string{"acme.com"},
+			blockedEmails:  []string{"good@acme.com"},
+			allowedDomains: []string{"acme.com"},
+			allowedEmails:  []string{"good@acme.com"},
+			email:          "asd@acme.com",
+			expected:       false,
+		},
+		{
+			name:           "blocking take precedence over allowing",
+			blockedDomains: []string{"acme.com"},
+			blockedEmails:  []string{"good@acme.com"},
+			allowedDomains: []string{"acme.com"},
+			allowedEmails:  []string{"good@acme.com"},
+			email:          "good@acme.com",
 			expected:       false,
 		},
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tc := tc
 
 			fn := controller.ValidateEmail(
 				tc.blockedDomains,

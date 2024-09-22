@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"slices"
 	"time"
 
@@ -44,8 +43,8 @@ func NewWorkflows(
 	email Emailer,
 	gravatarURL func(string) string,
 ) (*Workflows, error) {
-	allowedURLs := make([]*url.URL, len(cfg.AllowedRedirectURLs)+1)
-	allowedURLs[0] = cfg.ClientURL
+	allowedURLs := make([]string, len(cfg.AllowedRedirectURLs)+1)
+	allowedURLs[0] = cfg.ClientURL.String()
 	for i, u := range cfg.AllowedRedirectURLs {
 		allowedURLs[i+1] = u
 	}
@@ -297,7 +296,37 @@ func (wf *Workflows) GetUserByRefreshTokenHash(
 	return user, nil
 }
 
-func (wf *Workflows) UpdateSession(
+func (wf *Workflows) GetUserByTicket(
+	ctx context.Context,
+	ticket string,
+	logger *slog.Logger,
+) (sql.AuthUser, *APIError) {
+	user, err := wf.db.GetUserByTicket(ctx, sql.Text(ticket))
+	if errors.Is(err, pgx.ErrNoRows) {
+		logger.Warn("user not found")
+		return sql.AuthUser{}, ErrInvalidTicket //nolint:exhaustruct
+	}
+	if err != nil {
+		logger.Error("could not get user by ticket", logError(err))
+		return sql.AuthUser{}, ErrInternalServerError //nolint:exhaustruct
+	}
+
+	if apiErr := wf.ValidateUser(user, logger); apiErr != nil {
+		return user, apiErr
+	}
+
+	return user, nil
+}
+
+func pgtypeTextToOAPIEmail(pgemail pgtype.Text) *types.Email {
+	var email *types.Email
+	if pgemail.Valid {
+		email = ptr(types.Email(pgemail.String))
+	}
+	return email
+}
+
+func (wf *Workflows) UpdateSession( //nolint:funlen
 	ctx context.Context,
 	user sql.AuthUser,
 	refreshToken string,
@@ -313,10 +342,20 @@ func (wf *Workflows) UpdateSession(
 		logger.Warn("invalid refresh token")
 		return &api.Session{}, ErrInvalidRefreshToken //nolint:exhaustruct
 	}
+	if err != nil {
+		logger.Error("error getting user roles by refresh token", logError(err))
+		return nil, ErrInternalServerError
+	}
 
-	allowedRoles := make([]string, len(userRoles))
-	for i, role := range userRoles {
-		allowedRoles[i] = role.Role
+	allowedRoles := make([]string, 0, len(userRoles))
+	for _, role := range userRoles {
+		if role.Role.Valid {
+			allowedRoles = append(allowedRoles, role.Role.String)
+		}
+	}
+
+	if !slices.Contains(allowedRoles, user.DefaultRole) {
+		allowedRoles = append(allowedRoles, user.DefaultRole)
 	}
 
 	accessToken, expiresIn, err := wf.jwtGetter.GetToken(
@@ -345,7 +384,7 @@ func (wf *Workflows) UpdateSession(
 			CreatedAt:           user.CreatedAt.Time,
 			DefaultRole:         user.DefaultRole,
 			DisplayName:         user.DisplayName,
-			Email:               types.Email(user.Email.String),
+			Email:               pgtypeTextToOAPIEmail(user.Email),
 			EmailVerified:       user.EmailVerified,
 			Id:                  user.ID.String(),
 			IsAnonymous:         user.IsAnonymous,
@@ -408,7 +447,7 @@ func (wf *Workflows) NewSession(
 			CreatedAt:           user.CreatedAt.Time,
 			DefaultRole:         user.DefaultRole,
 			DisplayName:         user.DisplayName,
-			Email:               types.Email(user.Email.String),
+			Email:               pgtypeTextToOAPIEmail(user.Email),
 			EmailVerified:       user.EmailVerified,
 			Id:                  user.ID.String(),
 			IsAnonymous:         false,
@@ -515,6 +554,36 @@ func (wf *Workflows) ChangeEmail(
 	}
 
 	return user, nil
+}
+
+func (wf *Workflows) ChangePassword(
+	ctx context.Context,
+	userID uuid.UUID,
+	newPassord string,
+	logger *slog.Logger,
+) *APIError {
+	if err := wf.ValidatePassword(ctx, newPassord, logger); err != nil {
+		return err
+	}
+
+	hashedPassword, err := hashPassword(newPassord)
+	if err != nil {
+		logger.Error("error hashing password", logError(err))
+		return ErrInternalServerError
+	}
+
+	if _, err := wf.db.UpdateUserChangePassword(
+		ctx,
+		sql.UpdateUserChangePasswordParams{
+			ID:           userID,
+			PasswordHash: sql.Text(hashedPassword),
+		},
+	); err != nil {
+		logger.Error("error updating user password", logError(err))
+		return ErrInternalServerError
+	}
+
+	return nil
 }
 
 func (wf *Workflows) SendEmail(
@@ -724,7 +793,7 @@ func (wf *Workflows) SignupUserWithRefreshToken( //nolint:funlen
 		CreatedAt:           time.Now(),
 		DefaultRole:         *options.DefaultRole,
 		DisplayName:         deptr(options.DisplayName),
-		Email:               types.Email(email),
+		Email:               ptr(types.Email(email)),
 		EmailVerified:       false,
 		Id:                  resp.UserID.String(),
 		IsAnonymous:         false,
@@ -857,7 +926,7 @@ func (wf *Workflows) SignupUserWithSecurityKeyAndRefreshToken( //nolint:funlen
 		CreatedAt:           time.Now(),
 		DefaultRole:         *options.DefaultRole,
 		DisplayName:         deptr(options.DisplayName),
-		Email:               types.Email(email),
+		Email:               ptr(types.Email(email)),
 		EmailVerified:       false,
 		Id:                  userID.String(),
 		IsAnonymous:         false,
@@ -926,7 +995,7 @@ func (wf *Workflows) SignupUserWithSecurityKey( //nolint:funlen
 		CreatedAt:           time.Now(),
 		DefaultRole:         *options.DefaultRole,
 		DisplayName:         deptr(options.DisplayName),
-		Email:               types.Email(email),
+		Email:               ptr(types.Email(email)),
 		EmailVerified:       false,
 		Id:                  userID.String(),
 		IsAnonymous:         false,

@@ -2,7 +2,6 @@ package controller_test
 
 import (
 	"context"
-	"net/url"
 	"testing"
 	"time"
 
@@ -100,8 +99,7 @@ func TestPostUserPasswordReset(t *testing.T) { //nolint:maintidx
 			name: "with redirectTo",
 			config: func() *controller.Config {
 				cfg := getConfig()
-				u, _ := url.Parse("https://myapp.com")
-				cfg.AllowedRedirectURLs = []*url.URL{u}
+				cfg.AllowedRedirectURLs = []string{"https://myapp.com"}
 				return cfg
 			},
 			db: func(ctrl *gomock.Controller) controller.DBClient {
@@ -361,10 +359,8 @@ func TestPostUserPasswordReset(t *testing.T) { //nolint:maintidx
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tc := tc
 
 			ctrl := gomock.NewController(t)
 

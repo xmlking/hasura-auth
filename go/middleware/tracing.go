@@ -40,7 +40,7 @@ func (t Trace) NewSpan() Trace {
 // FromHTTPHeaders extracts tracing information from HTTP headers.
 // If no tracing information is found, a new trace is created with only `TraceID` set.
 func TraceFromHTTPHeaders(headers http.Header) Trace {
-	traceID := headers.Get(headerTraceID)
+	traceID := headers.Get(headerTraceID) //nolint:canonicalheader
 	if traceID == "" {
 		traceID = uuid.New().String()
 	}

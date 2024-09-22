@@ -3,98 +3,72 @@ package controller
 
 import (
 	"fmt"
-	"net/url"
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/gobwas/glob"
 )
 
-type urlMatcher struct {
-	Scheme   string
-	Hostname *regexp.Regexp
-	Port     string
-	Path     string
-}
-
-func newURLMatcher(u *url.URL) (urlMatcher, error) {
-	if u.Scheme == "" {
-		return urlMatcher{}, fmt.Errorf( //nolint:goerr113
-			"scheme is required for allowed redirect URL",
-		)
-	}
-
-	port := u.Port()
-	if port == "" && u.Scheme == "http" {
-		port = "80"
-	} else if port == "" && u.Scheme == "https" {
-		port = "443"
-	}
-
-	r := regexp.QuoteMeta(u.Hostname())
-	r = "^" + strings.ReplaceAll(r, `\*`, `(\w+|\w+-\w+)+`) + `$`
-	re, err := regexp.Compile(r)
-	if err != nil {
-		return urlMatcher{}, fmt.Errorf("error compiling regex: %w", err)
-	}
-
-	return urlMatcher{
-		Scheme:   u.Scheme,
-		Hostname: re,
-		Port:     port,
-		Path:     u.Path,
-	}, nil
-}
-
-func (m urlMatcher) Matches(scheme, host, port, path string) bool {
-	return m.Scheme == scheme &&
-		m.Port == port &&
-		m.Hostname.MatchString(host) &&
-		strings.HasPrefix(path, m.Path)
-}
-
 func ValidateRedirectTo( //nolint:cyclop
-	allowedRedirectURLs []*url.URL,
+	allowedRedirectURLs []string,
 ) (
 	func(redirectTo string) bool,
 	error,
 ) {
-	matchers := make([]urlMatcher, len(allowedRedirectURLs))
-	for i, u := range allowedRedirectURLs {
-		m, err := newURLMatcher(u)
-		if err != nil {
-			return nil, err
+	regexpContainsPort := regexp.MustCompile(`https?://[^/]+(:\d+)(.*)`)
+	regexpAddPort := regexp.MustCompile(`(https?://[^/]+)(.*)`)
+
+	matches := make([]glob.Glob, 0, len(allowedRedirectURLs))
+	for _, u := range allowedRedirectURLs {
+		// we want to allow any subpath of the allowed URL
+		switch {
+		case strings.HasSuffix(u, "/**"):
+		case strings.HasSuffix(u, "/*"):
+			u += "*"
+		case strings.HasSuffix(u, "/"):
+			u += "**"
+		default:
+			u += "/**"
 		}
 
-		matchers[i] = m
+		defaultPort := "80"
+		if strings.HasPrefix(u, "https://") {
+			defaultPort = "443"
+		}
+
+		// we need to account for default ports
+		if !regexpContainsPort.MatchString(u) {
+			u := regexpAddPort.ReplaceAllString(u, fmt.Sprintf("$1:%s$2", defaultPort))
+			m, err := glob.Compile(u, '.', '/')
+			if err != nil {
+				return nil, fmt.Errorf("error compiling glob: %w", err)
+			}
+			matches = append(matches, m)
+		}
+
+		m, err := glob.Compile(u, '.', '/')
+		if err != nil {
+			return nil, fmt.Errorf("error compiling glob: %w", err)
+		}
+
+		matches = append(matches, m)
 	}
 
 	return func(redirectTo string) bool {
-		u, err := url.Parse(redirectTo)
-		if err != nil {
-			return false
-		}
-
-		if u.Scheme == "" || u.Hostname() == "" {
-			return false
-		}
-
-		if len(allowedRedirectURLs) == 0 {
+		if len(matches) == 0 {
 			return true
 		}
 
-		port := u.Port()
-		if port == "" && u.Scheme == "http" {
-			port = "80"
-		} else if port == "" && u.Scheme == "https" {
-			port = "443"
-		}
+		redirectToClean := strings.Split(
+			strings.Split(redirectTo, "#")[0],
+			"?")[0]
 
-		for _, m := range matchers {
-			if m.Matches(u.Scheme, u.Hostname(), port, u.Path) {
+		for _, m := range matches {
+			if m.Match(redirectToClean) || m.Match(redirectToClean+"/") {
 				return true
 			}
 		}
-
 		return false
 	}, nil
 }
@@ -107,25 +81,27 @@ func ValidateEmail(
 ) func(email string) bool {
 	return func(email string) bool {
 		parts := strings.Split(email, "@")
-		if len(parts) != 2 { //nolint:gomnd
+		if len(parts) != 2 { //nolint:mnd
 			return false
 		}
-
 		domain := parts[1]
-
-		if slices.Contains(blockedEmailDomains, domain) {
-			return false
-		}
 
 		if slices.Contains(blockedEmails, email) {
 			return false
 		}
 
-		if (len(allowedEmailDomains) > 0 && !slices.Contains(allowedEmailDomains, domain)) &&
-			(len(allowedEmails) > 0 && !slices.Contains(allowedEmails, email)) {
+		if slices.Contains(allowedEmails, email) {
+			return true
+		}
+
+		if slices.Contains(blockedEmailDomains, domain) {
 			return false
 		}
 
-		return true
+		if slices.Contains(allowedEmailDomains, domain) {
+			return true
+		}
+
+		return len(allowedEmailDomains) == 0 && len(allowedEmails) == 0
 	}
 }

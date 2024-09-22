@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bradfitz/gomemcache/memcache"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/gin-gonic/gin"
@@ -18,6 +19,7 @@ import (
 	"github.com/nhost/hasura-auth/go/controller"
 	"github.com/nhost/hasura-auth/go/hibp"
 	"github.com/nhost/hasura-auth/go/middleware"
+	"github.com/nhost/hasura-auth/go/middleware/ratelimit"
 	"github.com/nhost/hasura-auth/go/sql"
 	ginmiddleware "github.com/oapi-codegen/gin-middleware"
 	"github.com/urfave/cli/v2"
@@ -30,6 +32,7 @@ const (
 	flagLogFormatTEXT                    = "log-format-text"
 	flagTrustedProxies                   = "trusted-proxies"
 	flagPostgresConnection               = "postgres"
+	flagPostgresMigrationsConnection     = "postgres-migrations"
 	flagNodeServerPath                   = "node-server-path"
 	flagDisableSignup                    = "disable-signup"
 	flagConcealErrors                    = "conceal-errors"
@@ -74,6 +77,20 @@ const (
 	flagWebauthnRPID                     = "webauthn-rp-id"
 	flagWebauthnRPOrigins                = "webauthn-rp-origins"
 	flagWebauthnAttestationTimeout       = "webauthn-attestation-timeout"
+	flagRateLimitEnable                  = "rate-limit-enable"
+	flagRateLimitGlobalBurst             = "rate-limit-global-burst"
+	flagRateLimitGlobalInterval          = "rate-limit-global-interval"
+	flagRateLimitEmailBurst              = "rate-limit-email-burst"
+	flagRateLimitEmailInterval           = "rate-limit-email-interval"
+	flagRateLimitEmailIsGlobal           = "rate-limit-email-is-global"
+	flagRateLimitSMSBurst                = "rate-limit-sms-burst"
+	flagRateLimitSMSInterval             = "rate-limit-sms-interval"
+	flagRateLimitBruteForceBurst         = "rate-limit-brute-force-burst"
+	flagRateLimitBruteForceInterval      = "rate-limit-brute-force-interval"
+	flagRateLimitSignupsBurst            = "rate-limit-signups-burst"
+	flagRateLimitSignupsInterval         = "rate-limit-signups-interval"
+	flagRateLimitMemcacheServer          = "rate-limit-memcache-server"
+	flagRateLimitMemcachePrefix          = "rate-limit-memcache-prefix"
 )
 
 func CommandServe() *cli.Command { //nolint:funlen,maintidx
@@ -85,7 +102,7 @@ func CommandServe() *cli.Command { //nolint:funlen,maintidx
 			&cli.StringFlag{ //nolint: exhaustruct
 				Name:     flagAPIPrefix,
 				Usage:    "prefix for all routes",
-				Value:    "/",
+				Value:    "",
 				Category: "server",
 				EnvVars:  []string{"AUTH_API_PREFIX"},
 			},
@@ -110,10 +127,16 @@ func CommandServe() *cli.Command { //nolint:funlen,maintidx
 			},
 			&cli.StringFlag{ //nolint: exhaustruct
 				Name:     flagPostgresConnection,
-				Usage:    "PostgreSQL connection URI: https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING. Required to inject the `auth` schema into the database.",
+				Usage:    "PostgreSQL connection URI: https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING",
 				Value:    "postgres://postgres:postgres@localhost:5432/local?sslmode=disable",
 				Category: "postgres",
 				EnvVars:  []string{"POSTGRES_CONNECTION", "HASURA_GRAPHQL_DATABASE_URL"},
+			},
+			&cli.StringFlag{ //nolint: exhaustruct
+				Name:     flagPostgresMigrationsConnection,
+				Usage:    "PostgreSQL connection URI for running migrations: https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING. Required to inject the `auth` schema into the database. If not specied, the `postgres connection will be used",
+				Category: "postgres",
+				EnvVars:  []string{"POSTGRES_MIGRATIONS_CONNECTION"},
 			},
 			&cli.StringFlag{ //nolint: exhaustruct
 				Name:     flagNodeServerPath,
@@ -214,14 +237,14 @@ func CommandServe() *cli.Command { //nolint:funlen,maintidx
 			&cli.IntFlag{ //nolint: exhaustruct
 				Name:     flagRefreshTokenExpiresIn,
 				Usage:    "Refresh token expires in (seconds)",
-				Value:    2592000, //nolint:gomnd
+				Value:    2592000, //nolint:mnd
 				Category: "jwt",
 				EnvVars:  []string{"AUTH_REFRESH_TOKEN_EXPIRES_IN"},
 			},
 			&cli.IntFlag{ //nolint: exhaustruct
 				Name:     flagAccessTokensExpiresIn,
 				Usage:    "Access tokens expires in (seconds)",
-				Value:    900, //nolint:gomnd
+				Value:    900, //nolint:mnd
 				Category: "jwt",
 				EnvVars:  []string{"AUTH_ACCESS_TOKEN_EXPIRES_IN"},
 			},
@@ -249,7 +272,7 @@ func CommandServe() *cli.Command { //nolint:funlen,maintidx
 				Name:     flagSMTPPort,
 				Usage:    "SMTP port",
 				Category: "smtp",
-				Value:    587, //nolint:gomnd
+				Value:    587, //nolint:mnd
 				EnvVars:  []string{"AUTH_SMTP_PORT"},
 			},
 			&cli.BoolFlag{ //nolint: exhaustruct
@@ -341,7 +364,7 @@ func CommandServe() *cli.Command { //nolint:funlen,maintidx
 			&cli.IntFlag{ //nolint: exhaustruct
 				Name:     flagPasswordMinLength,
 				Usage:    "Minimum password length",
-				Value:    3, //nolint:gomnd
+				Value:    3, //nolint:mnd
 				Category: "signup",
 				EnvVars:  []string{"AUTH_PASSWORD_MIN_LENGTH"},
 			},
@@ -431,9 +454,105 @@ func CommandServe() *cli.Command { //nolint:funlen,maintidx
 			&cli.IntFlag{ //nolint: exhaustruct
 				Name:     flagWebauthnAttestationTimeout,
 				Usage:    "Timeout for the attestation process in milliseconds",
-				Value:    60000, //nolint:gomnd
+				Value:    60000, //nolint:mnd
 				Category: "webauthn",
 				EnvVars:  []string{"AUTH_WEBAUTHN_ATTESTATION_TIMEOUT"},
+			},
+			&cli.BoolFlag{ //nolint: exhaustruct
+				Name:     flagRateLimitEnable,
+				Usage:    "Enable rate limiting",
+				Value:    false,
+				Category: "rate-limit",
+				EnvVars:  []string{"AUTH_RATE_LIMIT_ENABLE"},
+			},
+			&cli.IntFlag{ //nolint: exhaustruct
+				Name:     flagRateLimitGlobalBurst,
+				Usage:    "Global rate limit burst",
+				Value:    100, //nolint:mnd
+				Category: "rate-limit",
+				EnvVars:  []string{"AUTH_RATE_LIMIT_GLOBAL_BURST"},
+			},
+			&cli.DurationFlag{ //nolint: exhaustruct
+				Name:     flagRateLimitGlobalInterval,
+				Usage:    "Global rate limit interval",
+				Value:    time.Minute,
+				Category: "rate-limit",
+				EnvVars:  []string{"AUTH_RATE_LIMIT_GLOBAL_INTERVAL"},
+			},
+			&cli.IntFlag{ //nolint: exhaustruct
+				Name:     flagRateLimitEmailBurst,
+				Usage:    "Email rate limit burst",
+				Value:    10, //nolint:mnd
+				Category: "rate-limit",
+				EnvVars:  []string{"AUTH_RATE_LIMIT_EMAIL_BURST"},
+			},
+			&cli.DurationFlag{ //nolint: exhaustruct
+				Name:     flagRateLimitEmailInterval,
+				Usage:    "Email rate limit interval",
+				Value:    time.Hour,
+				Category: "rate-limit",
+				EnvVars:  []string{"AUTH_RATE_LIMIT_EMAIL_INTERVAL"},
+			},
+			&cli.BoolFlag{ //nolint: exhaustruct
+				Name:     flagRateLimitEmailIsGlobal,
+				Usage:    "Email rate limit is global instead of per user",
+				Value:    false,
+				Category: "rate-limit",
+				EnvVars:  []string{"AUTH_RATE_LIMIT_EMAIL_IS_GLOBAL"},
+			},
+			&cli.IntFlag{ //nolint: exhaustruct
+				Name:     flagRateLimitSMSBurst,
+				Usage:    "SMS rate limit burst",
+				Value:    10, //nolint:mnd
+				Category: "rate-limit",
+				EnvVars:  []string{"AUTH_RATE_LIMIT_SMS_BURST"},
+			},
+			&cli.DurationFlag{ //nolint: exhaustruct
+				Name:     flagRateLimitSMSInterval,
+				Usage:    "SMS rate limit interval",
+				Value:    time.Hour,
+				Category: "rate-limit",
+				EnvVars:  []string{"AUTH_RATE_LIMIT_SMS_INTERVAL"},
+			},
+			&cli.IntFlag{ //nolint: exhaustruct
+				Name:     flagRateLimitBruteForceBurst,
+				Usage:    "Brute force rate limit burst",
+				Value:    10, //nolint:mnd
+				Category: "rate-limit",
+				EnvVars:  []string{"AUTH_RATE_LIMIT_BRUTE_FORCE_BURST"},
+			},
+			&cli.DurationFlag{ //nolint: exhaustruct
+				Name:     flagRateLimitBruteForceInterval,
+				Usage:    "Brute force rate limit interval",
+				Value:    5 * time.Minute, //nolint:mnd
+				Category: "rate-limit",
+				EnvVars:  []string{"AUTH_RATE_LIMIT_BRUTE_FORCE_INTERVAL"},
+			},
+			&cli.IntFlag{ //nolint: exhaustruct
+				Name:     flagRateLimitSignupsBurst,
+				Usage:    "Signups rate limit burst",
+				Value:    10, //nolint:mnd
+				Category: "rate-limit",
+				EnvVars:  []string{"AUTH_RATE_LIMIT_SIGNUPS_BURST"},
+			},
+			&cli.DurationFlag{ //nolint: exhaustruct
+				Name:     flagRateLimitSignupsInterval,
+				Usage:    "Signups rate limit interval",
+				Value:    5 * time.Minute, //nolint:mnd
+				Category: "rate-limit",
+				EnvVars:  []string{"AUTH_RATE_LIMIT_SIGNUPS_INTERVAL"},
+			},
+			&cli.StringFlag{ //nolint: exhaustruct
+				Name:     flagRateLimitMemcacheServer,
+				Usage:    "Store sliding window rate limit data in memcache",
+				Category: "rate-limit",
+				EnvVars:  []string{"AUTH_RATE_LIMIT_MEMCACHE_SERVER"},
+			},
+			&cli.StringFlag{ //nolint: exhaustruct
+				Name:     flagRateLimitMemcachePrefix,
+				Usage:    "Prefix for rate limit keys in memcache",
+				Category: "rate-limit",
+				EnvVars:  []string{"AUTH_RATE_LIMIT_MEMCACHE_PREFIX"},
 			},
 		},
 		Action: serve,
@@ -461,12 +580,52 @@ func getNodeServer(cCtx *cli.Context) *exec.Cmd {
 		env = append(env, "NODE_ENV=development")
 	}
 
+	if cCtx.String(flagPostgresMigrationsConnection) != "" {
+		for i, v := range env {
+			if strings.HasPrefix(v, "HASURA_GRAPHQL_DATABASE_URL=") {
+				env[i] = "HASURA_GRAPHQL_DATABASE_URL=" + cCtx.String(
+					flagPostgresMigrationsConnection,
+				)
+			}
+		}
+	}
+
 	cmd := exec.CommandContext(cCtx.Context, "node", "./dist/start.js")
 	cmd.Dir = cCtx.String(flagNodeServerPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = env
 	return cmd
+}
+
+func getRateLimiter(cCtx *cli.Context, logger *slog.Logger) gin.HandlerFunc {
+	var store ratelimit.Store
+	if cCtx.String(flagRateLimitMemcacheServer) != "" {
+		store = ratelimit.NewMemcacheStore(
+			memcache.New(cCtx.String(flagRateLimitMemcacheServer)),
+			cCtx.String(flagRateLimitMemcachePrefix),
+			logger.WithGroup("rate-limit-memcache"),
+		)
+	} else {
+		store = ratelimit.NewInMemoryStore()
+	}
+
+	return ratelimit.RateLimit(
+		cCtx.String(flagAPIPrefix),
+		cCtx.Int(flagRateLimitGlobalBurst),
+		cCtx.Duration(flagRateLimitGlobalInterval),
+		cCtx.Int(flagRateLimitEmailBurst),
+		cCtx.Duration(flagRateLimitEmailInterval),
+		cCtx.Bool(flagRateLimitEmailIsGlobal),
+		cCtx.Bool(flagEmailSigninEmailVerifiedRequired),
+		cCtx.Int(flagRateLimitSMSBurst),
+		cCtx.Duration(flagRateLimitSMSInterval),
+		cCtx.Int(flagRateLimitBruteForceBurst),
+		cCtx.Duration(flagRateLimitBruteForceInterval),
+		cCtx.Int(flagRateLimitSignupsBurst),
+		cCtx.Duration(flagRateLimitSignupsInterval),
+		store,
+	)
 }
 
 func getGoServer( //nolint:funlen
@@ -483,12 +642,18 @@ func getGoServer( //nolint:funlen
 		URL: cCtx.String(flagAPIPrefix),
 	})
 
-	router.Use(
+	handlers := []gin.HandlerFunc{
 		// ginmiddleware.OapiRequestValidator(doc),
 		gin.Recovery(),
 		cors(),
 		middleware.Logger(logger),
-	)
+	}
+
+	if cCtx.Bool(flagRateLimitEnable) {
+		handlers = append(handlers, getRateLimiter(cCtx, logger))
+	}
+
+	router.Use(handlers...)
 
 	emailer, err := getEmailer(cCtx, logger)
 	if err != nil {
@@ -542,7 +707,7 @@ func getGoServer( //nolint:funlen
 	server := &http.Server{ //nolint:exhaustruct
 		Addr:              ":" + cCtx.String(flagPort),
 		Handler:           router,
-		ReadHeaderTimeout: 5 * time.Second, //nolint:gomnd
+		ReadHeaderTimeout: 5 * time.Second, //nolint:mnd
 	}
 
 	return server, nil

@@ -19,6 +19,17 @@ WITH refresh_token AS (
 SELECT * FROM auth.users
 WHERE id = (SELECT user_id FROM refresh_token) LIMIT 1;
 
+-- name: GetUserByTicket :one
+WITH selected_user AS (
+    SELECT * FROM auth.users
+    WHERE ticket = $1  AND ticket_expires_at > now()
+    LIMIT 1
+)
+UPDATE auth.users
+SET ticket = NULL, ticket_expires_at = now()
+WHERE id = (SELECT id FROM selected_user)
+RETURNING *;
+
 -- name: InsertUser :one
 WITH inserted_user AS (
     INSERT INTO auth.users (
@@ -159,7 +170,7 @@ updated_user AS (
     WHERE auth.users.id = refreshed_token.user_id
 )
 SELECT refreshed_token.refresh_token_id, role FROM auth.user_roles
-JOIN refreshed_token ON auth.user_roles.user_id = refreshed_token.user_id;
+RIGHT JOIN refreshed_token ON auth.user_roles.user_id = refreshed_token.user_id;
 
 -- name: UpdateUserLastSeen :one
 UPDATE auth.users
@@ -178,6 +189,12 @@ UPDATE auth.users
 SET (ticket, ticket_expires_at, new_email) = ($2, $3, $4)
 WHERE id = $1
 RETURNING *;
+
+-- name: UpdateUserChangePassword :one
+UPDATE auth.users
+SET password_hash = $2
+WHERE id = $1
+RETURNING id;
 
 -- name: CountSecurityKeysUser :one
 SELECT COUNT(*) FROM auth.user_security_keys

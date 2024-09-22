@@ -14,10 +14,10 @@ import (
 	"github.com/nhost/hasura-auth/go/controller"
 	"github.com/nhost/hasura-auth/go/controller/mock"
 	"github.com/nhost/hasura-auth/go/sql"
+	"github.com/oapi-codegen/runtime/types"
 	"go.uber.org/mock/gomock"
 )
 
-//nolint:dupl
 func getAnonymousUser(userID uuid.UUID) sql.AuthUser {
 	//nolint:exhaustruct
 	return sql.AuthUser{
@@ -31,9 +31,9 @@ func getAnonymousUser(userID uuid.UUID) sql.AuthUser {
 		DisplayName:              "Anonymous User",
 		AvatarUrl:                "",
 		Locale:                   "en",
-		Email:                    sql.Text(""),
+		Email:                    pgtype.Text{},
 		PhoneNumber:              pgtype.Text{},
-		PasswordHash:             sql.Text(""),
+		PasswordHash:             pgtype.Text{},
 		EmailVerified:            false,
 		PhoneNumberVerified:      false,
 		NewEmail:                 pgtype.Text{},
@@ -83,8 +83,8 @@ func TestPostToken(t *testing.T) { //nolint:maintidx
 						),
 					}),
 				).Return([]sql.RefreshTokenAndGetUserRolesRow{
-					{Role: "user", RefreshTokenID: tokenID},
-					{Role: "me", RefreshTokenID: tokenID},
+					{Role: sql.Text("user"), RefreshTokenID: tokenID},
+					{Role: sql.Text("me"), RefreshTokenID: tokenID},
 				}, nil)
 
 				return mock
@@ -105,7 +105,7 @@ func TestPostToken(t *testing.T) { //nolint:maintidx
 						CreatedAt:           time.Now(),
 						DefaultRole:         "user",
 						DisplayName:         "Jane Doe",
-						Email:               "jane@acme.com",
+						Email:               ptr(types.Email("jane@acme.com")),
 						EmailVerified:       true,
 						Id:                  "db477732-48fa-4289-b694-2886a646b6eb",
 						IsAnonymous:         false,
@@ -167,7 +167,7 @@ func TestPostToken(t *testing.T) { //nolint:maintidx
 						),
 					}),
 				).Return([]sql.RefreshTokenAndGetUserRolesRow{
-					{Role: "anonymous", RefreshTokenID: tokenID},
+					{Role: sql.Text("anonymous"), RefreshTokenID: tokenID},
 				}, nil)
 
 				return mock
@@ -188,7 +188,7 @@ func TestPostToken(t *testing.T) { //nolint:maintidx
 						CreatedAt:           time.Now(),
 						DefaultRole:         "anonymous",
 						DisplayName:         "Anonymous User",
-						Email:               "",
+						Email:               nil,
 						EmailVerified:       false,
 						Id:                  "db477732-48fa-4289-b694-2886a646b6eb",
 						IsAnonymous:         true,
@@ -301,10 +301,8 @@ func TestPostToken(t *testing.T) { //nolint:maintidx
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tc := tc
 
 			ctrl := gomock.NewController(t)
 
