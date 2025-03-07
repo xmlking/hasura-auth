@@ -111,6 +111,7 @@ type CustomClaims struct {
 	httpclient         *http.Client
 	graphqlURL         string
 	requestInterceptor []RequestInterceptor
+	defaults           map[string]any // added default values field
 }
 
 func CustomClaimerAddAdminSecret(adminSecret string) RequestInterceptor {
@@ -119,10 +120,12 @@ func CustomClaimerAddAdminSecret(adminSecret string) RequestInterceptor {
 	}
 }
 
+// Modify the constructor to accept defaults.
 func NewCustomClaims(
 	rawClaims map[string]string,
 	httpclient *http.Client,
 	graphqlURL string,
+	defaults map[string]any, // new parameter for defaults
 	requestInterceptor ...RequestInterceptor,
 ) (*CustomClaims, error) {
 	claims := make(map[string]any)
@@ -153,6 +156,7 @@ func NewCustomClaims(
 		httpclient:         httpclient,
 		graphqlURL:         graphqlURL,
 		requestInterceptor: requestInterceptor,
+		defaults:           defaults, // save defaults here
 	}, nil
 }
 
@@ -188,6 +192,7 @@ func (c *CustomClaims) getClaimsBackwardsCompatibility(data any, path []string) 
 	return nil
 }
 
+// Updated ExtractClaims to use defaults when a claim is nil.
 func (c *CustomClaims) ExtractClaims(data any) (map[string]any, error) {
 	claims := make(map[string]any)
 	for name, j := range c.jsonPaths {
@@ -211,6 +216,14 @@ func (c *CustomClaims) ExtractClaims(data any) (map[string]any, error) {
 				got = v[0][0].Interface()
 			}
 		}
+
+		// Check for nil value and apply default if available
+		if got == nil && c.defaults != nil {
+			if defVal, exists := c.defaults[name]; exists {
+				got = defVal
+			}
+		}
+
 		claims[name] = got
 	}
 	return claims, nil
